@@ -1203,9 +1203,14 @@ def make_manifest(
         "outputs": [{"uri": uri}],
         "metadata": metadata,
     }
+    manifest_path = pathlib.Path(pulse_dir).resolve() / "manifest.yaml"
+    if hasattr(Manifest, "model_validate"):  # SimDB with the Pydantic Manifest: fields must go through validation
+        m = Manifest.model_validate(data, context={"base_path": manifest_path.parent})
+        m._path = manifest_path
+        return m
     m = Manifest()
     m._data = data
-    m._path = pathlib.Path(pulse_dir).resolve() / "manifest.yaml"
+    m._path = manifest_path
     m._metadata = {"metadata": metadata}
     return m
 
