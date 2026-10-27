@@ -48,7 +48,7 @@ Once you have this, you can run the migration script. As an example:
 
 `-m TC26_crosswalk.xlsx` selects the mapping file in `resources/mappings`.
 
-`--simdb` is an optional flag which skips the HDF5 write step, ingesting the in-memory IDSs into a local SimDB.
+`--simdb` is an optional flag which skips the HDF5 write step, ingesting each pulse into a local SimDB as metadata only.
 
 ## Authoring the crosswalk
 
@@ -523,7 +523,7 @@ Run `python idstools/scripts/bin/idsmigration -h` for the full help. The argumen
 | `-m`, `--mapping`    | `2008_crosswalk.xlsx` | Crosswalk spreadsheet filename under `resources/mappings/` |
 | `--dd-version`       | `4.1.1`               | Data Dictionary version used to build the IDS factory |
 | `--validate`         | off                   | Run crosswalk/data/DD validation and exit; nothing is written |
-| `--simdb`            | off                   | Ingest each migrated pulse into the local SimDB (see below) |
+| `--simdb`            | off                   | Ingest each migrated pulse into the local SimDB as metadata only |
 | `--per-time-slice`   | off                   | Write one IDS set per CSV row instead of one per `(machine, pulse)` group |
 | `-v`, `--verbose`    | off                   | Print each constant conflict as it is resolved (see [Seeing the conflicts](#seeing-the-conflicts--v)) |
 
@@ -615,11 +615,11 @@ Each entry's manifest carries:
 | `metadata.dataset` / `metadata.machine` | the experiment label and the pulse's `summary/machine` value |
 | `metadata.standard_name.*`              | manifest quantities diverted from the in-memory `temporary` IDS (see [Diversion under `--simdb`](#diversion-under---simdb)) whose crosswalk row has a sidecar [`standard_names`](#standard_names) entry, keyed by that standard name |
 | `metadata.db_variable.*`                | the same, for manifest quantities with no `standard_names` entry, keyed by `csv_column` instead |
-| `outputs.uri`                           | `imas:hdf5?path=<pulse_dir>#summary` (a **reference** to the on-disk summary IDS) |
-| `inputs[].uri`                          | Absolute `file:` URIs for the crosswalk XLSX, its same-stem YAML sidecar (when present), and the original input CSV, in that order; shared by every pulse entry in the run |
-
-Input URIs use the filesystem of the Python environment running the migration. Linux records paths such as `file:///home/user/IDStools/resources/mappings/TC26_crosswalk.xlsx`; Windows records `file:///C:/Users/...`. On Windows only, the migration adjusts SimDB's file-URI parser in its own process to handle drive letters and URI escaping during ingestion and database reads. Linux behavior and the installed SimDB package are unchanged.
+| `metadata.<summary path>`               | every filled `summary` leaf, e.g. `global_quantities.ip.value` (see below) |
+| `inputs` / `outputs`                    | empty: the entry lists no files, so nothing is uploaded on `simdb simulation push` |
 
 Each manifest quantity lands in exactly one of the two groups, decided per-row by `temp_var_name()`: a sidecar `standard_names` entry sends it to `standard_name.<name>`; a blank one falls back to `db_variable.<csv_column>`.  This keeps quantities with an agreed IMAS standard name distinguishable, when queried later, from ad-hoc database columns that don't have one yet (e.g. `simdb simulation query standard_name.loss_power=...` vs `db_variable.SELEC2007=...`).
 
-SimDB is a metadata catalogue: it stores the manifest plus a checksummed *reference* to the `summary` IDS, not its array data.  The `summary` IDS is therefore always written to HDF5, with or without `--simdb`; only the `temporary` IDS write is suppressed when ingesting.  A `summary/machine` mapping row is required; the script raises at load if `--simdb` is used without one.
+No HDF5 files are written under `--simdb`. SimDB normally reads an entry's `summary` metadata from its IMAS output; here the `summary` IDS is built in memory instead, and SimDB's own reader (`simdb.imas.metadata.load_imas_metadata`, the function SimDB applies to an ingested IMAS output) turns it into metadata that is put into the manifest. The keys and `{min, max}` ranges are therefore the same as for an ingestion from files. Since nothing is written, `ids_properties.version_put.*` is filled IDS's DD version. A `summary/machine` mapping row is required; the script raises at load if `--simdb` is used without one.
+
+Run without `--simdb` to write the HDF5 files instead.

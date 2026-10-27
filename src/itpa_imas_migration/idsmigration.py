@@ -22,6 +22,7 @@ import time
 import pathlib
 from datetime import datetime, timedelta
 import imas
+import imas.util
 import pandas as pd
 import numpy as np
 import yaml
@@ -38,6 +39,11 @@ try:
     SIMDB_AVAILABLE = True
 except ImportError:
     SIMDB_AVAILABLE = False
+
+try:
+    from simdb.imas.metadata import load_imas_metadata
+except ImportError:
+    load_imas_metadata = None
 
 logging.getLogger("imas").setLevel(logging.WARNING)  # Avoid IMAS errors for type mismatches.
 
@@ -615,8 +621,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--simdb",
         action="store_true",
-        help="Ingest each migrated pulse into the local SimDB; diverts manifest quantities "
-        "into manifest variables instead of a temporary IDS \t(requires the simdb package)",
+        help="Ingest each migrated pulse into the local SimDB as metadata only",
     )
     parser.add_argument(
         "--per-time-slice",
@@ -1092,46 +1097,6 @@ def process_pulse(
 # ---------------------------------------------------------------------------
 
 
-def _configure_simdb_windows_file_uris() -> None:
-    """Handle Windows file paths in this process without changing the installed SimDB."""
-    if sys.platform != "win32":
-        return
-
-    from urllib.request import url2pathname
-    import simdb.uri as simdb_uri
-
-    if getattr(simdb_uri.URI, "_migration_windows_file_uris", False):
-        return
-
-    base_uri = simdb_uri.URI
-
-    class WindowsFileURI(base_uri):
-        _migration_windows_file_uris = True
-
-        def __init__(self, uri=None, *, scheme=None, path=None):
-            if uri is not None and scheme in (None, "file") and str(uri).lower().startswith("file:"):
-                if isinstance(uri, base_uri):
-                    file_path = uri.path
-                else:
-                    raw_path = str(uri)[5:]
-                    # Manifest.inputs also constructs file:// + a native glob result.
-                    if "\\" in raw_path:
-                        file_path = pathlib.Path(raw_path.removeprefix("//"))
-                    else:
-                        file_path = pathlib.Path(url2pathname(raw_path))
-                super().__init__(scheme="file", path=file_path if path is None else path)
-            else:
-                super().__init__(uri, scheme=scheme, path=path)
-
-        def __str__(self):
-            if self.scheme == "file" and self.path is not None and self.path.is_absolute():
-                return self.path.as_uri()
-            return super().__str__()
-
-    # SimDB's manifest parser and ORM both look up this class when reading URIs.
-    simdb_uri.URI = WindowsFileURI
-
-
 def extract_variables(temporary_ids: IDS) -> dict:
     """Read scalars out of an in-memory `temporary` IDS into a {name: value} dict."""
     result: dict[str, Any] = {}
@@ -1165,28 +1130,58 @@ def extract_variables(temporary_ids: IDS) -> dict:
     return result
 
 
+class _InMemoryEntry:
+    """The one DBEntry method SimDB's `load_imas_metadata` uses, served from in-memory IDSs."""
+
+    def __init__(self, pulse_ids: dict[str, IDS]) -> None:
+        self._pulse_ids = pulse_ids
+
+    def get(self, ids_name: str, autoconvert: bool = True) -> IDS:
+        return self._pulse_ids[ids_name]
+
+
+def set_version_put(ids: IDS) -> None:
+    """Fill `ids_properties/version_put` as IMAS-Python's `DBEntry.put` does.
+
+    Sset the IDS's DD version".
+    """
+    if not hasattr(ids.ids_properties, "version_put"):  
+        return
+
+    version_put = ids.ids_properties.version_put
+    version_put.data_dictionary = imas.util.get_data_dictionary_version(ids)
+
+
+def summary_metadata(pulse_ids: dict[str, IDS]) -> dict:
+    """SimDB metadata for the in-memory `summary` IDS.
+
+    Runs SimDB's own reader `simdb.imas.metadata.load_imas_metadata`.
+    """
+    set_version_put(pulse_ids["summary"])
+    return load_imas_metadata({"summary": {"values": "all"}}, _InMemoryEntry(pulse_ids))
+
+
 def make_manifest(
-    pulse_dir: pathlib.Path,
     dataset: str,
     machine: str,
     alias: str,
     variables: dict,
     name_kind: dict[str, str],
-    input_paths: tuple[pathlib.Path, ...] = (),
+    summary_meta: dict,
 ) -> "Manifest":
     """Build a SimDB Manifest for one migrated pulse (one entry per pulse).
 
-    `variables` (from extract_variables) is split into "standard_name" and "db_variable"
-    metadata groups per `name_kind` (from temp_var_name), so each is queryable as
-    standard_name.<name> or db_variable.<name>.
+    The entry is metadata only:  `summary_meta` (from `summary_metadata`) carries the `summary` values. 
+    `variables` (from extract_variables) is split into "standard_name" and  "db_variable" metadata groups 
+    per `name_kind` (from temp_var_name), so each is queryable as standard_name.<name> or db_variable.<name>.
     """
-    _configure_simdb_windows_file_uris()
     metadata = [
         {"dataset": dataset},
         {"machine": machine},
         {"code": {"name": "idsmigration", "version": ""}},
-        {"description": f"{machine} pulse from the {dataset} database migrated to IMAS HDF5."},
+        {"description": f"{machine} pulse from the {dataset} database migrated to SimDB metadata (no IMAS files)."},
     ]
+    metadata += [{key: value} for key, value in summary_meta.items()]
     standard_vars = {name: v for name, v in variables.items() if name_kind.get(name) == "standard_name"}
     dbvariable_vars = {
         name: v for name, v in variables.items() if name_kind.get(name, "db_variable") != "standard_name"
@@ -1195,15 +1190,8 @@ def make_manifest(
         metadata.append({"standard_name": standard_vars})
     if dbvariable_vars:
         metadata.append({"db_variable": dbvariable_vars})
-    uri = f"imas:hdf5?path={pathlib.Path(pulse_dir).resolve().as_posix()}#summary"
-    data = {
-        "manifest_version": 2,
-        "alias": alias,
-        "inputs": [{"uri": path.resolve().as_uri()} for path in input_paths],
-        "outputs": [{"uri": uri}],
-        "metadata": metadata,
-    }
-    manifest_path = pathlib.Path(pulse_dir).resolve() / "manifest.yaml"
+    data = {"manifest_version": 2, "alias": alias, "inputs": [], "outputs": [], "metadata": metadata}
+    manifest_path = pathlib.Path.cwd() / "manifest.yaml"
     if hasattr(Manifest, "model_validate"):  # SimDB with the Pydantic Manifest: fields must go through validation
         m = Manifest.model_validate(data, context={"base_path": manifest_path.parent})
         m._path = manifest_path
@@ -1261,17 +1249,15 @@ def run_migration(
     per_time_slice: bool = True,
     resolve_spec: dict[str, dict] | None = None,
     database_comment: str | None = None,
-    input_paths: tuple[pathlib.Path, ...] = (),
 ) -> None:
     """Build and write each pulse to disk immediately, without accumulating in memory.
 
     Default: one IDS set per pulse (rows grouped by (machine, pulse), dynamic nodes carry the
     ordered time-slices). With `--per-time-slice`, one IDS set per CSV row.
 
-    When `simdb_enabled`, the in-memory `temporary` IDS is diverted into the SimDB manifest as
-    `variables` metadata instead of being written to disk, and one SimDB entry is ingested per
-    pulse. The `summary` IDS is always written to disk (SimDB catalogues it by reference).
-    `input_paths` records the source crosswalk, optional sidecar, and CSV in each manifest.
+    Without `simdb_enabled`, every pulse's IDSs are written to HDF5 under `output_dir`. With it,
+    metadata-only SimDB entry is ingested per pulse, holding the `summary` values 
+    (see `summary_metadata`) and the `temporary` IDS quantities as `variables` metadata.
 
     `database_comment` (see `format_database_comment`) is stamped onto every root's
     `ids_properties.comment` in every pulse.
@@ -1369,7 +1355,8 @@ def run_migration(
         groups = list(data.groupby([machine_col, pulse_col], sort=False))
         total, units = len(groups), pulse_units(groups)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if not simdb_enabled:
+        output_dir.mkdir(parents=True, exist_ok=True)
     done = 0
     ingested = 0
     failed: list[str] = []
@@ -1378,12 +1365,15 @@ def run_migration(
 
     for dir_name, machine, alias, progress_label, pulse_ids in units:
         temp_ids = pulse_ids.pop("temporary", None) if simdb_enabled else None
-        pulse_dir = write_pulse_dir(output_dir, dir_name, pulse_ids)
+        if not simdb_enabled:
+            write_pulse_dir(output_dir, dir_name, pulse_ids)
         done += 1
 
         if simdb_enabled:
             variables = extract_variables(temp_ids) if temp_ids is not None else {}
-            manifest = make_manifest(pulse_dir, dataset, machine, alias, variables, temp_name_kind, input_paths)
+            manifest = make_manifest(
+                dataset, machine, alias, variables, temp_name_kind, summary_metadata(pulse_ids)
+            )
             if simdb_ingest(db, config, manifest, alias):
                 ingested += 1
             else:
@@ -1391,7 +1381,7 @@ def run_migration(
 
         last_report = report_progress(done, total, progress_label, start, last_report)
 
-    report_summary("Processed", done, total, start, f" to {output_dir}")
+    report_summary("Processed", done, total, start, " (simdb ingested)" if simdb_enabled else f" to {output_dir}")
     if simdb_enabled:
         report_summary("Ingested", ingested, done, start, " into SimDB")
         if failed:
@@ -1411,8 +1401,6 @@ def main() -> None:
     VERBOSE = args.verbose
     mapping_path = ROOT / "resources" / "mappings" / args.mapping
     dataset_path = ROOT / "resources" / "input" / args.dataset
-    sidecar_path = mapping_path.with_suffix(".yaml")
-    input_paths = (mapping_path,) + ((sidecar_path,) if sidecar_path.is_file() else ()) + (dataset_path,)
     output_dir = ROOT / "resources" / "results" / args.experiment
     sidecar = load_sidecar(mapping_path)
     crosswalk = load_crosswalk(mapping_path, sidecar)
@@ -1430,6 +1418,8 @@ def main() -> None:
     if args.simdb and not SIMDB_AVAILABLE:
         print("WARNING: --simdb given but the 'simdb' package is not importable -- skipping ingestion")
     simdb_enabled = args.simdb and SIMDB_AVAILABLE
+    if simdb_enabled and load_imas_metadata is None:
+        raise SystemExit("--simdb needs a SimDB version providing simdb.imas.metadata.load_imas_metadata")
     config = db = None
     if simdb_enabled:
         config = Config()
@@ -1447,7 +1437,6 @@ def main() -> None:
         per_time_slice=args.per_time_slice,
         resolve_spec=sidecar["resolve"],
         database_comment=format_database_comment(sidecar["database"]),
-        input_paths=input_paths,
     )
 
 
