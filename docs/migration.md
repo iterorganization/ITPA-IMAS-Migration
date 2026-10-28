@@ -48,7 +48,7 @@ Once you have this, you can run the migration script. As an example:
 
 `-m TC26_crosswalk.xlsx` selects the mapping file in `resources/mappings`.
 
-`--simdb` is an optional flag which skips the HDF5 write step, ingesting each pulse into a local SimDB as metadata only.
+`--simdb` is an optional flag which ingests each pulse into a local SimDB, with no input files attached: single time-slice pulses as metadata only, pulses with several time-slices also with their HDF5 files (see [SimDB ingestion](#simdb-ingestion---simdb)). To send the entries straight to a SimDB server instead, use `--remote <name>` (see the README).
 
 ## Authoring the crosswalk
 
@@ -523,7 +523,10 @@ Run `python idstools/scripts/bin/idsmigration -h` for the full help. The argumen
 | `-m`, `--mapping`    | `2008_crosswalk.xlsx` | Crosswalk spreadsheet filename under `resources/mappings/` |
 | `--dd-version`       | `4.1.1`               | Data Dictionary version used to build the IDS factory |
 | `--validate`         | off                   | Run crosswalk/data/DD validation and exit; nothing is written |
-| `--simdb`            | off                   | Ingest each migrated pulse into the local SimDB as metadata only |
+| `--simdb`            | off                   | Ingest each migrated pulse into the local SimDB; HDF5 is written only for multi time-slice pulses (see below) |
+| `--remote NAME`      | off                   | Send the entries to the SimDB server `NAME` instead of the local SimDB, uploading multi time-slice pulses' HDF5 files; implies `--simdb` |
+| `--replace`          | off                   | With `--remote`: delete and re-send pulses already on the server (needs its admin role) |
+| `--uploaded-by NAME` | login name            | With `--remote`: value recorded as `uploaded_by` |
 | `--per-time-slice`   | off                   | Write one IDS set per CSV row instead of one per `(machine, pulse)` group |
 | `-v`, `--verbose`    | off                   | Print each constant conflict as it is resolved (see [Seeing the conflicts](#seeing-the-conflicts--v)) |
 
@@ -616,10 +619,11 @@ Each entry's manifest carries:
 | `metadata.standard_name.*`              | manifest quantities diverted from the in-memory `temporary` IDS (see [Diversion under `--simdb`](#diversion-under---simdb)) whose crosswalk row has a sidecar [`standard_names`](#standard_names) entry, keyed by that standard name |
 | `metadata.db_variable.*`                | the same, for manifest quantities with no `standard_names` entry, keyed by `csv_column` instead |
 | `metadata.<summary path>`               | every filled `summary` leaf, e.g. `global_quantities.ip.value` (see below) |
-| `inputs` / `outputs`                    | empty: the entry lists no files, so nothing is uploaded on `simdb simulation push` |
+| `inputs`                                | empty: no input files are attached or uploaded |
+| `outputs`                               | single time-slice pulse: empty (metadata only); several time-slices: `imas:hdf5?path=<pulse_dir>`, the pulse's `summary` + `temporary` IDS files, uploaded on push |
 
 Each manifest quantity lands in exactly one of the two groups, decided per-row by `temp_var_name()`: a sidecar `standard_names` entry sends it to `standard_name.<name>`; a blank one falls back to `db_variable.<csv_column>`.  This keeps quantities with an agreed IMAS standard name distinguishable, when queried later, from ad-hoc database columns that don't have one yet (e.g. `simdb simulation query standard_name.loss_power=...` vs `db_variable.SELEC2007=...`).
 
-No HDF5 files are written under `--simdb`. SimDB normally reads an entry's `summary` metadata from its IMAS output; here the `summary` IDS is built in memory instead, and SimDB's own reader (`simdb.imas.metadata.load_imas_metadata`, the function SimDB applies to an ingested IMAS output) turns it into metadata that is put into the manifest. The keys and `{min, max}` ranges are therefore the same as for an ingestion from files. Since nothing is written, `ids_properties.version_put.*` is filled IDS's DD version. A `summary/machine` mapping row is required; the script raises at load if `--simdb` is used without one.
+SimDB stores a numeric metadata array only as its `{min, max}` range. For a single time-slice pulse that is the exact value, so the entry is metadata only: the `summary` IDS is built in memory, and SimDB's own reader (`simdb.imas.metadata.load_imas_metadata`, the function SimDB applies to an ingested IMAS output) turns it into the manifest metadata; since nothing is written, `ids_properties.version_put.data_dictionary` is filled with the IDS's DD version. For a pulse with several time-slices the range loses the per-slice values, so its IDSs (`summary` and `temporary`) are also written to HDF5 under `resources/results/<experiment>/` and attached as the entry's output: SimDB reads the metadata from these files, and `simdb simulation push` (or `--remote`) uploads them, so the notebooks can download the full per-slice arrays. A `summary/machine` mapping row is required; the script raises at load if `--simdb` is used without one.
 
-Run without `--simdb` to write the HDF5 files instead.
+Run without `--simdb` to write HDF5 files for every pulse instead.
