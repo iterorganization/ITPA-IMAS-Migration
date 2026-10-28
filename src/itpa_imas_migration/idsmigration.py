@@ -12,6 +12,7 @@ See docs/migration.md for the crosswalk format and full behaviour reference.
 
 from typing import Any, NamedTuple
 import argparse
+import getpass
 import ast
 import builtins
 import collections
@@ -580,7 +581,7 @@ def report_summary(verb: str, count: int, total: int, start: float, suffix: str 
 # ---------------------------------------------------------------------------
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Convert tabular experimental data (CSV) into IMAS IDS objects via a crosswalk spreadsheet",
@@ -621,7 +622,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--simdb",
         action="store_true",
-        help="Ingest each migrated pulse into the local SimDB as metadata only",
+        help="Ingest each migrated pulse into the local SimDB, single "
+        "time-slice pulses as metadata only, multi time-slice pulses as HDF5 output \t(requires the simdb package)",
+    )
+    parser.add_argument(
+        "--remote",
+        metavar="NAME",
+        help="Send the entries to the SimDB server NAME from your simdb configuration (`simdb remote config "
+        "list`) instead of the local SimDB, uploading the multi time-slice pulses' HDF5 files; implies --simdb",
+    )
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="With --remote: delete and re-send pulses already on the server (needs the server's admin role); "
+        "by default they are skipped",
+    )
+    parser.add_argument(
+        "--uploaded-by",
+        metavar="NAME",
+        help="With --remote: value recorded as uploaded_by \t(default: your login name)",
     )
     parser.add_argument(
         "--per-time-slice",
@@ -636,7 +655,7 @@ def parse_args() -> argparse.Namespace:
         help="Print each constant-quantity conflict as it is resolved (pulse, variable, the two "
         "disagreeing values, strategy applied and the value kept)",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 SIDECAR_SECTIONS = ("resolve", "sentinels", "errors", "standard_names", "database")
@@ -1168,18 +1187,22 @@ def make_manifest(
     variables: dict,
     name_kind: dict[str, str],
     summary_meta: dict,
+    pulse_dir: pathlib.Path | None = None,
 ) -> "Manifest":
     """Build a SimDB Manifest for one migrated pulse (one entry per pulse).
 
-    The entry is metadata only:  `summary_meta` (from `summary_metadata`) carries the `summary` values. 
-    `variables` (from extract_variables) is split into "standard_name" and  "db_variable" metadata groups 
-    per `name_kind` (from temp_var_name), so each is queryable as standard_name.<name> or db_variable.<name>.
+    With `pulse_dir` (a multi-slice pulse), the HDF5 entry there is
+    the manifest's output: SimDB reads the `summary` metadata from it, and a push uploads its files.
+    Without it the entry is metadata only, and `summary_meta` (from `summary_metadata`) carries the
+    `summary` values that SimDB would otherwise read from an HDF5 output. `variables` (from extract_variables) is split into "standard_name" and
+    "db_variable" metadata groups per `name_kind` (from temp_var_name), so each is queryable as
+    standard_name.<name> or db_variable.<name>.
     """
     metadata = [
         {"dataset": dataset},
         {"machine": machine},
         {"code": {"name": "idsmigration", "version": ""}},
-        {"description": f"{machine} pulse from the {dataset} database migrated to SimDB metadata (no IMAS files)."},
+        {"description": f"{machine} pulse from the {dataset} database migrated to SimDB metadata "},
     ]
     metadata += [{key: value} for key, value in summary_meta.items()]
     standard_vars = {name: v for name, v in variables.items() if name_kind.get(name) == "standard_name"}
@@ -1190,7 +1213,10 @@ def make_manifest(
         metadata.append({"standard_name": standard_vars})
     if dbvariable_vars:
         metadata.append({"db_variable": dbvariable_vars})
-    data = {"manifest_version": 2, "alias": alias, "inputs": [], "outputs": [], "metadata": metadata}
+    outputs = []
+    if pulse_dir is not None:
+        outputs.append({"uri": f"imas:hdf5?path={pathlib.Path(pulse_dir).resolve().as_posix()}"})
+    data = {"manifest_version": 2, "alias": alias, "inputs": [], "outputs": outputs, "metadata": metadata}
     manifest_path = pathlib.Path.cwd() / "manifest.yaml"
     if hasattr(Manifest, "model_validate"):  # SimDB with the Pydantic Manifest: fields must go through validation
         m = Manifest.model_validate(data, context={"base_path": manifest_path.parent})
@@ -1216,7 +1242,7 @@ def write_pulse_dir(output_dir: pathlib.Path, name: str, pulse_ids: dict[str, ID
     """Write a pulse's IDS set to its own HDF5 directory (pulse=0) and return the directory."""
     pulse_dir = output_dir / name
     pulse_dir.mkdir(parents=True, exist_ok=True)
-    with imas.DBEntry(f"imas:hdf5?path={pulse_dir};pulse=0", "w") as entry:
+    with imas.DBEntry(f"imas:hdf5?path={pulse_dir.as_posix()};pulse=0", "w") as entry:
         for ids in pulse_ids.values():
             entry.put(ids)
     return pulse_dir
@@ -1256,8 +1282,10 @@ def run_migration(
     ordered time-slices). With `--per-time-slice`, one IDS set per CSV row.
 
     Without `simdb_enabled`, every pulse's IDSs are written to HDF5 under `output_dir`. With it,
-    metadata-only SimDB entry is ingested per pulse, holding the `summary` values 
-    (see `summary_metadata`) and the `temporary` IDS quantities as `variables` metadata.
+    one SimDB entry is ingested per pulse, holding the `summary` values and the `temporary` IDS
+    quantities as `variables` metadata, with no input files. A single-slice pulse is metadata only
+    (its values are exact; see `summary_metadata`). A pulse with several time-slices is also written
+    to HDF5 under `output_dir` and attached as the entry's output, the files keep the per-slice values.
 
     `database_comment` (see `format_database_comment`) is stamped onto every root's
     `ids_properties.comment` in every pulse.
@@ -1358,22 +1386,27 @@ def run_migration(
     if not simdb_enabled:
         output_dir.mkdir(parents=True, exist_ok=True)
     done = 0
+    written = 0
     ingested = 0
     failed: list[str] = []
     start = time.monotonic()
     last_report = start
 
     for dir_name, machine, alias, progress_label, pulse_ids in units:
-        temp_ids = pulse_ids.pop("temporary", None) if simdb_enabled else None
-        if not simdb_enabled:
-            write_pulse_dir(output_dir, dir_name, pulse_ids)
+        # Under --simdb only multi-slice pulses get HDF5 files: SimDB keeps a numeric array only as
+        # {min, max}, so their per-slice values would otherwise be lost. Single-slice pulses are exact.
+        multi_slice = len(pulse_ids["summary"].time) > 1 if "summary" in pulse_ids else False
+        pulse_dir = None
+        if not simdb_enabled or multi_slice:
+            pulse_dir = write_pulse_dir(output_dir, dir_name, pulse_ids)
+            written += 1
         done += 1
 
         if simdb_enabled:
+            temp_ids = pulse_ids.get("temporary")
             variables = extract_variables(temp_ids) if temp_ids is not None else {}
-            manifest = make_manifest(
-                dataset, machine, alias, variables, temp_name_kind, summary_metadata(pulse_ids)
-            )
+            summary_meta = {} if pulse_dir is not None else summary_metadata(pulse_ids)
+            manifest = make_manifest(dataset, machine, alias, variables, temp_name_kind, summary_meta, pulse_dir)
             if simdb_ingest(db, config, manifest, alias):
                 ingested += 1
             else:
@@ -1381,7 +1414,7 @@ def run_migration(
 
         last_report = report_progress(done, total, progress_label, start, last_report)
 
-    report_summary("Processed", done, total, start, " (simdb ingested)" if simdb_enabled else f" to {output_dir}")
+    report_summary("Processed", done, total, start, f" ({written} written as HDF5 to {output_dir})")
     if simdb_enabled:
         report_summary("Ingested", ingested, done, start, " into SimDB")
         if failed:
@@ -1394,10 +1427,19 @@ def run_migration(
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    """Run the CSV -> IDS migration pipeline."""
+def main(argv: list[str] | None = None, db: Any = None) -> None:
+    """Run the CSV -> IDS migration pipeline.
+
+    `argv` replaces the command line; `db`, when given with --simdb, receives the SimDB entries
+    instead of the local SimDB (it needs `insert_simulation` and `delete_simulation`, see
+    `simdb_ingest`). With --remote, an `upload_to_simdb_server.SimDBServerUploader` for that server is used this way.
+    """
     global VERBOSE
-    args = parse_args()
+    args = parse_args(argv)
+    if args.remote:
+        args.simdb = True
+    elif args.replace or args.uploaded_by:
+        raise SystemExit("--replace and --uploaded-by only apply with --remote")
     VERBOSE = args.verbose
     mapping_path = ROOT / "resources" / "mappings" / args.mapping
     dataset_path = ROOT / "resources" / "input" / args.dataset
@@ -1420,10 +1462,17 @@ def main() -> None:
     simdb_enabled = args.simdb and SIMDB_AVAILABLE
     if simdb_enabled and load_imas_metadata is None:
         raise SystemExit("--simdb needs a SimDB version providing simdb.imas.metadata.load_imas_metadata")
-    config = db = None
+    config = None
+    uploader = None
     if simdb_enabled:
         config = Config()
-        db = get_local_db(config)
+        if args.remote:
+            from itpa_imas_migration import upload_to_simdb_server
+
+            uploaded_by = args.uploaded_by or getpass.getuser()
+            uploader = db = upload_to_simdb_server.connect(args.remote, args.experiment, args.replace, uploaded_by)
+        elif db is None:
+            db = get_local_db(config)
 
     run_migration(
         crosswalk,
@@ -1438,6 +1487,8 @@ def main() -> None:
         resolve_spec=sidecar["resolve"],
         database_comment=format_database_comment(sidecar["database"]),
     )
+    if uploader is not None and not upload_to_simdb_server.report(uploader):
+        sys.exit(1)
 
 
 if __name__ == "__main__":
