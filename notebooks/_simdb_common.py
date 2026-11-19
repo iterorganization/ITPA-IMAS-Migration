@@ -70,7 +70,7 @@ class RemoteSimulation:
         finally:
             imas_log.setLevel(level)
         for name, value in variables.items():  # same split as the SimDB metadata
-            bucket = "standard_name" if f"standard_name.{name}" in self._metadata else "db_variable"
+            bucket = "standard_name" if f"standard_name.{name}" in self._metadata else "unmapped"
             md.setdefault(bucket, {})[name] = value
         # Add the SimDB metadata the files do not provide (dataset, description, status, ...). Numeric
         # quantities are stored there only as {min, max} (or null): their values come from the files.
@@ -263,8 +263,8 @@ def path(md: dict, *keys: str, n: int) -> np.ndarray:
 
 
 def temp(md: dict, *names: str, n: int) -> np.ndarray:
-    """First matching temporary-IDS quantity: db_variable.<name> or standard_name.<name>."""
-    for bucket in ("db_variable", "standard_name"):
+    """First matching temporary-IDS quantity: unmapped.<name> or standard_name.<name>."""
+    for bucket in ("unmapped", "standard_name"):
         for name in names:
             v = md.get(bucket, {}).get(name)
             if v is not None:
@@ -274,7 +274,7 @@ def temp(md: dict, *names: str, n: int) -> np.ndarray:
 
 def temp_str(md: dict, *names: str, n: int) -> np.ndarray:
     """Like temp(), but for string-valued temporary-IDS quantities."""
-    for bucket in ("db_variable", "standard_name"):
+    for bucket in ("unmapped", "standard_name"):
         for name in names:
             v = md.get(bucket, {}).get(name)
             if v is not None:
@@ -296,7 +296,7 @@ def path_str(md: dict, *keys: str, n: int) -> np.ndarray:
 
 
 def query_selected(db: RemoteDB, dataset: str, selec_key: str, machine: Optional[str] = None, value: str = "1") -> list[Any]:
-    """Simulations for `dataset` (optionally restricted to `machine`) where db_variable.<selec_key>
+    """Simulations for `dataset` (optionally restricted to `machine`) where unmapped.<selec_key>
     equals `value` in at least one time-slice."""
     target = float(value)
     return [

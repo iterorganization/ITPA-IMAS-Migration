@@ -373,14 +373,14 @@ Errors that cannot be expressed in these three forms are left as free-text `note
 
 ### `standard_names`
 
-The IMAS standard name for a `status=manifest` variable, used as its `identifier/name` in the `temporary` IDS instead of the raw `csv_column` (see [Temporary IDSs](#temporary-idss)), and to route it into `metadata.standard_name.*` rather than `metadata.db_variable.*` under `--simdb` (see [SimDB ingestion](#simdb-ingestion---simdb)).
+The IMAS standard name for a `status=manifest` variable, used as its `identifier/name` in the `temporary` IDS instead of the raw `csv_column` (see [Temporary IDSs](#temporary-idss)), and to route it into `metadata.standard_name.*` rather than `metadata.unmapped.*` under `--simdb` (see [SimDB ingestion](#simdb-ingestion---simdb)).
 
 ```yaml
 standard_names:
   SPLASMA: area_of_separatrix
 ```
 
-A variable absent from this section falls back to `csv_column` for its identifier name, and lands in `db_variable.*` under `--simdb`. Only `status=manifest` rows read this section; an entry against a mapped row is harmless but never applied.
+A variable absent from this section falls back to `csv_column` for its identifier name, and lands in `unmapped.*` under `--simdb`. Only `status=manifest` rows read this section; an entry against a mapped row is harmless but never applied.
 
 ### `database`
 
@@ -410,6 +410,28 @@ database:
 | `previous_maintainers`  | list of str     | Prior maintainers, if the database has changed hands |
 
 `format_database_comment()` renders every present field into a single ` -- `-joined string, written verbatim to `ids_properties.comment` on **every** top-level IDS created for **every** pulse (see `new_ids`). An absent or empty `database` section (or one where every field is blank/empty) renders to `None` and no comment is written -- this is expected while fields are still placeholders pending manual completion.
+
+The URLs found in `paper`, `csv` and `definitions` (in that order, non-URL text such as "TBD" ignored) are also recorded as provenance references of every IDS, each labelled with what it holds: `paper`, `source data` and `variable definitions` respectively. A URL given in several fields is recorded once with the labels joined, so point each field at the page that actually holds that resource (e.g. the article's `/data` page for the CSV and definitions, not the article itself). See `database_references()` and [IDS metadata written by the script](#ids-metadata-written-by-the-script).
+
+## IDS metadata written by the script
+
+Besides the crosswalk writes, `new_ids()` stamps the same run-wide metadata onto **every** top-level IDS of **every** pulse:
+
+| Field | Value |
+| ----- | ----- |
+| `ids_properties/comment` | the sidecar `database` description (see [`database`](#database)) |
+| `ids_properties/creation_date` | the migration start time, UTC, `YYYY-MM-DDTHH:MM:SSZ` (one value per run) -- **not** a date from the source database |
+| `ids_properties/provenance/node(0)/path` | `""` (the provenance applies to the whole IDS) |
+| `ids_properties/provenance/node(0)/reference(:)/name` | one external URL per reference from the sidecar `database` section, followed by what it holds in parentheses, e.g. `https://doi.org/10.1088/1741-4326/ae39f2 (paper)`, `https://iopscience.iop.org/article/10.1088/1741-4326/ae39f2/data (source data, variable definitions)`; `timestamp` is left empty |
+| `code/name`, `code/description` | `idsmigration` and a short description |
+| `code/version` | `git describe --tags --dirty` when a tag exists, else the installed package version |
+| `code/commit` | `git rev-parse HEAD`, suffixed `-dirty` when tracked files have uncommitted changes |
+| `code/repository` | `git remote get-url origin`, normalised to an `https://` URL without credentials |
+
+The git-derived fields are read from the checkout the package runs from; any that cannot be determined (no git, not a checkout) are left empty. Under `--simdb` the same `name`/`version`/`commit`/`repository` go into the manifest's `metadata.code`.
+
+Dates from the source database belong in physics fields instead: the shot date in `summary/pulse_time_begin`, and a record "last update" date (e.g. `LUPDATE`, `LCUPDATE`) in `summary/pulse_processing_time_begin`. Because `creation_date` and `code` are owned by the script, a crosswalk row targeting `ids_properties/creation_date` or any `code/...` path is rejected by validation.
+
 ---
 
 ## Temporary IDSs
@@ -448,7 +470,7 @@ The `imas_path` column is ignored for manifest rows; the entire path is derived 
 
 ### Diversion under `--simdb`
 
-By default the `temporary` IDS is written to the HDF5 backend like any other root.  When the script is run with `--simdb` (see [SimDB ingestion](#simdb-ingestion---simdb)), the `temporary` IDS is built in memory exactly as above but **not** written to disk; instead its scalars are read back out (`identifier/name` → `value`) and attached to the pulse's SimDB manifest as `standard_name.*`/`db_variable.*` metadata (see [SimDB ingestion](#simdb-ingestion---simdb) for how that split is decided).  `csv_dtype` still drives the in-memory layout in both cases.
+By default the `temporary` IDS is written to the HDF5 backend like any other root.  When the script is run with `--simdb` (see [SimDB ingestion](#simdb-ingestion---simdb)), the `temporary` IDS is built in memory exactly as above but **not** written to disk; instead its scalars are read back out (`identifier/name` → `value`) and attached to the pulse's SimDB manifest as `standard_name.*`/`unmapped.*` metadata (see [SimDB ingestion](#simdb-ingestion---simdb) for how that split is decided).  `csv_dtype` still drives the in-memory layout in both cases.
 
 ---
 
@@ -487,6 +509,7 @@ anyway); recoverable ones **warn** and continue:
 | ----- | --------- |
 | Every `csv_column` exists in the data CSV | raise |
 | Every `imas_path` (after `&` split and index stripping) exists in the DD; for sibling-pair rows both leaves of the pair exist under the node | raise |
+| No `imas_path` targets `ids_properties/creation_date` or `code/...` (written by the script, see [IDS metadata written by the script](#ids-metadata-written-by-the-script)) | raise |
 | Formula `transform_args` parse, and every free name is a CSV column or Python builtin | raise |
 | Dictionary / formula rows have a `transform_args` string | raise |
 | Dictionary keys cover every value observed in the data column | warn, listing each uncovered value with its count (those rows are skipped silently at run time) |
@@ -616,13 +639,14 @@ Each entry's manifest carries:
 | --------------------------------------- | ------ |
 | `alias`                                 | **default mode:** `{dataset}/{machine}/{pulse}`; **`--per-time-slice` mode:** `{dataset}-{machine}-{index}`, where `dataset` is the `--experiment` value and `index` is a per-machine counter |
 | `metadata.dataset` / `metadata.machine` | the experiment label and the pulse's `summary/machine` value |
+| `metadata.code`                         | `name`, `version`, `commit` and `repository` of the migration code (see [IDS metadata written by the script](#ids-metadata-written-by-the-script)); empty fields are omitted |
 | `metadata.standard_name.*`              | manifest quantities diverted from the in-memory `temporary` IDS (see [Diversion under `--simdb`](#diversion-under---simdb)) whose crosswalk row has a sidecar [`standard_names`](#standard_names) entry, keyed by that standard name |
-| `metadata.db_variable.*`                | the same, for manifest quantities with no `standard_names` entry, keyed by `csv_column` instead |
-| `metadata.<summary path>`               | every filled `summary` leaf, e.g. `global_quantities.ip.value` (see below) |
+| `metadata.unmapped.*`                   | the same, for manifest quantities with no `standard_names` entry, keyed by `csv_column` instead |
+| `metadata.<summary path>`               | every filled `summary` leaf, e.g. `global_quantities.ip.value` (see below), including the script-written `ids_properties.creation_date`, provenance references and `code.*` |
 | `inputs`                                | empty: no input files are attached or uploaded |
 | `outputs`                               | single time-slice pulse: empty (metadata only); several time-slices: `imas:hdf5?path=<pulse_dir>`, the pulse's `summary` + `temporary` IDS files, uploaded on push |
 
-Each manifest quantity lands in exactly one of the two groups, decided per-row by `temp_var_name()`: a sidecar `standard_names` entry sends it to `standard_name.<name>`; a blank one falls back to `db_variable.<csv_column>`.  This keeps quantities with an agreed IMAS standard name distinguishable, when queried later, from ad-hoc database columns that don't have one yet (e.g. `simdb simulation query standard_name.loss_power=...` vs `db_variable.SELEC2007=...`).
+Each manifest quantity lands in exactly one of the two groups, decided per-row by `temp_var_name()`: a sidecar `standard_names` entry sends it to `standard_name.<name>`; a blank one falls back to `unmapped.<csv_column>`.  This keeps quantities with an agreed IMAS standard name distinguishable, when queried later, from ad-hoc database columns that don't have one yet (e.g. `simdb simulation query standard_name.loss_power=...` vs `unmapped.SELEC2007=...`).
 
 SimDB stores a numeric metadata array only as its `{min, max}` range. For a single time-slice pulse that is the exact value, so the entry is metadata only: the `summary` IDS is built in memory, and SimDB's own reader (`simdb.imas.metadata.load_imas_metadata`, the function SimDB applies to an ingested IMAS output) turns it into the manifest metadata; since nothing is written, `ids_properties.version_put.data_dictionary` is filled with the IDS's DD version. For a pulse with several time-slices the range loses the per-slice values, so its IDSs (`summary` and `temporary`) are also written to HDF5 under `resources/results/<experiment>/` and attached as the entry's output: SimDB reads the metadata from these files, and `simdb simulation push` (or `--remote`) uploads them, so the notebooks can download the full per-slice arrays. A `summary/machine` mapping row is required; the script raises at load if `--simdb` is used without one.
 

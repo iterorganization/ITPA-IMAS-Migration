@@ -18,10 +18,12 @@ import builtins
 import collections
 import re
 import logging
+import subprocess
 import sys
 import time
 import pathlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from importlib import metadata as importlib_metadata
 import imas
 import imas.util
 import pandas as pd
@@ -29,6 +31,8 @@ import numpy as np
 import yaml
 
 from rich_argparse import RichHelpFormatter
+
+from itpa_imas_migration import __version__
 
 # SimDB is an optional dependency: the --simdb step is disabled if it is not importable.
 try:
@@ -249,6 +253,96 @@ def format_database_comment(database: dict) -> str | None:
     return " -- ".join(parts) if parts else None
 
 
+_URL_RE = re.compile(r"https?://[^\s,;]+")
+
+
+# Sidecar `database` fields holding external-resource URLs, in reference order, with the label each
+# gives a URL in its provenance reference name.
+REFERENCE_FIELDS = (("paper", "paper"), ("csv", "source data"), ("definitions", "variable definitions"))
+
+
+def database_references(database: dict) -> list[str]:
+    """Labelled external-resource URLs of the sidecar's `database` entry, for provenance references.
+
+    URLs are taken from `paper`, every `csv` entry and `definitions`, in that order, with trailing
+    punctuation trimmed; non-URL text (e.g. "Public source URL TBD") is skipped. Each is rendered as
+    `<url> (<labels>)`, the labels naming what the URL holds (see `REFERENCE_FIELDS`); a URL found in
+    several fields is listed once with their labels joined, e.g.
+    `https://.../data (source data, variable definitions)`.
+    """
+    if not database:
+        return []
+    labels: dict[str, list[str]] = {}  # url -> labels, in first-seen order
+    for field, label in REFERENCE_FIELDS:
+        value = database.get(field) or []
+        for text in [value] if isinstance(value, str) else value:
+            for url in _URL_RE.findall(text or ""):
+                url = url.rstrip(".)'\"")
+                url_labels = labels.setdefault(url, [])
+                if label not in url_labels:
+                    url_labels.append(label)
+    return [f"{url} ({', '.join(url_labels)})" for url, url_labels in labels.items()]
+
+
+class CodeInfo(NamedTuple):
+    """Identity of the migration code, written to every IDS `code` node and the SimDB manifest."""
+
+    name: str = "idsmigration"
+    description: str = "ITPA scalar database CSV -> IMAS IDS migration (itpa-imas-migration)"
+    version: str = ""
+    commit: str = ""
+    repository: str = ""
+
+
+def _git(*args: str) -> str:
+    """Run a git command in the package's checkout; '' on any failure (no git, not a checkout, ...)."""
+    try:
+        out = subprocess.run(["git", "-C", str(HERE), *args], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def _public_repo_url(url: str) -> str:
+    """Normalise a git remote URL to https: git@host:owner/repo.git -> https://host/owner/repo, no credentials."""
+    if not url:
+        return ""
+    scp = re.fullmatch(r"[\w.-]+@([\w.-]+):(.+)", url)  # scp-like SSH form
+    if scp:
+        url = f"https://{scp.group(1)}/{scp.group(2)}"
+    url = re.sub(r"^ssh://(?:[^@/]+@)?([^/:]+)(?::\d+)?/", r"https://\1/", url)
+    url = re.sub(r"^(https?://)[^@/]+@", r"\1", url)  # drop user[:token]@
+    return url.removesuffix(".git")
+
+
+def code_info() -> CodeInfo:
+    """Read the code version, commit and repository URL from git, when running from a checkout.
+
+    version: `git describe --tags --dirty` if a tag exists, else the installed package version.
+    commit:  HEAD hash, suffixed `-dirty` when tracked files have uncommitted changes.
+    Fields that cannot be determined are left empty.
+    """
+    commit = _git("rev-parse", "HEAD")
+    if commit and _git("status", "--porcelain", "--untracked-files=no"):
+        commit += "-dirty"
+    version = _git("describe", "--tags", "--dirty")
+    if not version:
+        try:
+            version = importlib_metadata.version("itpa-imas-migration")
+        except importlib_metadata.PackageNotFoundError:
+            version = __version__
+    return CodeInfo(version=version, commit=commit, repository=_public_repo_url(_git("remote", "get-url", "origin")))
+
+
+class IdsHeader(NamedTuple):
+    """Run-wide metadata stamped onto every top-level IDS created by the migration (see `new_ids`)."""
+
+    comment: str | None = None
+    creation_date: str = ""
+    references: tuple[str, ...] = ()
+    code: CodeInfo | None = None
+
+
 def _try_parse_dict(x: Any) -> Any:
     """If x is a string that looks like a dict literal, parse and return the dict; else return x."""
     if isinstance(x, str) and x.strip().startswith("{"):
@@ -281,16 +375,34 @@ def error_bar(spec: Any, value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def new_ids(factory: imas.IDSFactory, name: str, comment: str | None = None) -> IDS:
-    """Create a fresh top-level IDS with homogeneous time mode set and an optional source comment.
+def new_ids(factory: imas.IDSFactory, name: str, header: IdsHeader = IdsHeader()) -> IDS:
+    """Create a fresh top-level IDS with homogeneous time mode and the run-wide `header` metadata.
 
-    `comment` (from the sidecar's `database` section, see `format_database_comment`) is written
-    verbatim to `ids_properties.comment` when given.
+    - `ids_properties.comment`: the sidecar's `database` description (see `format_database_comment`);
+    - `ids_properties.creation_date`: the migration time (not a date from the source database);
+    - `ids_properties.provenance.node(0)`: whole-IDS node (empty path) whose references are the
+      sidecar's external URLs, each labelled with what it holds (see `database_references`);
+    - `code`: name, description, version, commit and repository of this migration code.
+    Empty fields are left unset.
     """
     ids = factory.new(name)
-    ids.ids_properties.homogeneous_time = imas.ids_defs.IDS_TIME_MODE_HOMOGENEOUS
-    if comment:
-        ids.ids_properties.comment = comment
+    props = ids.ids_properties
+    props.homogeneous_time = imas.ids_defs.IDS_TIME_MODE_HOMOGENEOUS
+    if header.comment:
+        props.comment = header.comment
+    if header.creation_date:
+        props.creation_date = header.creation_date
+    if header.references:
+        props.provenance.node.resize(1)
+        node = props.provenance.node[0]
+        node.path = ""  # empty path: the provenance applies to the whole IDS
+        node.reference.resize(len(header.references))
+        for ref, url in zip(node.reference, header.references):
+            ref.name = url
+    if header.code is not None:
+        for field, value in header.code._asdict().items():
+            if value:
+                setattr(ids.code, field, value)
     return ids
 
 
@@ -674,7 +786,8 @@ def load_sidecar(mapping_path: pathlib.Path) -> dict[str, dict]:
       errors         : per-machine error bars -- see `check_errors`
       standard_names : IMAS standard name for a manifest variable -- see `check_standard_names`
       database       : free-text description of the source database, written into every pulse's
-                        `ids_properties.comment` -- see `check_database`/`format_database_comment`
+                        `ids_properties.comment`, its URLs also into `ids_properties.provenance`
+                        -- see `check_database`/`format_database_comment`/`database_references`
 
     Every section is optional, however a missing file gives warning.
     """
@@ -917,6 +1030,25 @@ def _check_manifest_buckets(df: pd.DataFrame, factory: imas.IDSFactory) -> None:
         raise ValueError("csv_dtype validation failed:\n  " + "\n  ".join(bad))
 
 
+def _check_reserved_paths(df: pd.DataFrame) -> None:
+    """No crosswalk row may write the metadata the script stamps itself (see `new_ids`):
+    `ids_properties/creation_date` (the migration date) and the `code` node (this code's identity)."""
+    bad = []
+    for _, row in df.iterrows():
+        imas_path = row["imas_path"]
+        if row["status"] == "manifest" or not isinstance(imas_path, str):
+            continue
+        for path in imas_path.split("&"):
+            segs = [parse_seg(seg)[0] for seg in path.strip().split("/")]
+            if segs[1:3] == ["ids_properties", "creation_date"] or segs[1:2] == ["code"]:
+                bad.append(f"row {row.name} ('{row['csv_column']}'): '{path.strip()}' is written by the script")
+    if bad:
+        raise ValueError(
+            "imas_path targets reserved metadata (creation_date = migration date; code = migration code):\n  "
+            + "\n  ".join(bad)
+        )
+
+
 def validate(df: pd.DataFrame, data: pd.DataFrame, factory: imas.IDSFactory, sidecar: dict[str, dict]) -> None:
     """Upfront validation of the crosswalk against the data CSV, the Data Dictionary and the sidecar."""
     # Upfront validation: all csv_columns must exist in data.
@@ -925,6 +1057,7 @@ def validate(df: pd.DataFrame, data: pd.DataFrame, factory: imas.IDSFactory, sid
         raise ValueError(f"csv_column(s) not found in data CSV: {missing_cols}")
 
     _check_dd_paths(df, factory)
+    _check_reserved_paths(df)
     _check_dictionary_coverage(df, data)
     _check_formula_identifiers(df, data)
     _check_machine_keys(df, data)
@@ -943,12 +1076,12 @@ def temp_var_name(cw_row: pd.Series) -> tuple[str, str]:
     """Resolve a manifest row's identifier/name and its provenance kind.
 
     Returns (standard name, "standard_name") when the sidecar's `standard_names` section has an
-    entry for this row's csv_column, else (csv_column, "db_variable").
+    entry for this row's csv_column, else (csv_column, "unmapped").
     """
     std_name = cw_row.get("_standard_name")
     if isinstance(std_name, str) and std_name.strip():
         return std_name.strip(), "standard_name"
-    return cw_row["csv_column"], "db_variable"
+    return cw_row["csv_column"], "unmapped"
 
 
 def build_write_spec(df: pd.DataFrame) -> pd.DataFrame:
@@ -1031,7 +1164,7 @@ def process_pulse(
     *,
     pulse_ids: dict[str, IDS] | None = None,
     context: WriteContext = WriteContext(),
-    database_comment: str | None = None,
+    header: IdsHeader = IdsHeader(),
 ) -> dict[str, IDS]:
     """Write one data row (= one time-slice) into the per-root IDS dict for a pulse.
 
@@ -1040,8 +1173,8 @@ def process_pulse(
     `context.slice_index` to accumulate a pulse's time-slices into one IDS set; the default
     (fresh dict, single slice) reproduces the original one-IDS-per-row behaviour.
 
-    `database_comment` (see `format_database_comment`) is stamped onto every newly created root's
-    `ids_properties.comment`.
+    `header` (comment, creation date, provenance, code) is stamped onto every newly created root,
+    see `new_ids`.
     """
     if pulse_ids is None:
         pulse_ids = {}
@@ -1069,7 +1202,7 @@ def process_pulse(
         for imas_path in cw_row["_paths"]:
             ids_root = imas_path.split("/")[0]
             if ids_root not in pulse_ids:
-                pulse_ids[ids_root] = new_ids(factory, ids_root, comment=database_comment)
+                pulse_ids[ids_root] = new_ids(factory, ids_root, header)
             ids = pulse_ids[ids_root]
             value_branch = (imas_path + ("/" + value_leaf if value_leaf else "")).split("/")[1:]
 
@@ -1188,31 +1321,32 @@ def make_manifest(
     name_kind: dict[str, str],
     summary_meta: dict,
     pulse_dir: pathlib.Path | None = None,
+    code: CodeInfo = CodeInfo(),
 ) -> "Manifest":
     """Build a SimDB Manifest for one migrated pulse (one entry per pulse).
 
     With `pulse_dir` (a multi-slice pulse), the HDF5 entry there is
     the manifest's output: SimDB reads the `summary` metadata from it, and a push uploads its files.
     Without it the entry is metadata only, and `summary_meta` (from `summary_metadata`) carries the
-    `summary` values that SimDB would otherwise read from an HDF5 output. `variables` (from extract_variables) is split into "standard_name" and
-    "db_variable" metadata groups per `name_kind` (from temp_var_name), so each is queryable as
-    standard_name.<name> or db_variable.<name>.
+    `summary` values that SimDB would otherwise read from an HDF5 output. `variables` (from
+    extract_variables) is split into "standard_name" and "unmapped" metadata groups per `name_kind`
+    (from temp_var_name), so each is queryable as standard_name.<name> or unmapped.<name>. `code`
+    identifies the migration code (empty fields omitted); it matches the `summary` IDS's own `code`
+    node, which SimDB also reads.
     """
     metadata = [
         {"dataset": dataset},
         {"machine": machine},
-        {"code": {"name": "idsmigration", "version": ""}},
+        {"code": {k: v for k, v in code._asdict().items() if v and k != "description"}},
         {"description": f"{machine} pulse from the {dataset} database migrated to SimDB metadata "},
     ]
     metadata += [{key: value} for key, value in summary_meta.items()]
     standard_vars = {name: v for name, v in variables.items() if name_kind.get(name) == "standard_name"}
-    dbvariable_vars = {
-        name: v for name, v in variables.items() if name_kind.get(name, "db_variable") != "standard_name"
-    }
+    unmapped_vars = {name: v for name, v in variables.items() if name_kind.get(name, "unmapped") != "standard_name"}
     if standard_vars:
         metadata.append({"standard_name": standard_vars})
-    if dbvariable_vars:
-        metadata.append({"db_variable": dbvariable_vars})
+    if unmapped_vars:
+        metadata.append({"unmapped": unmapped_vars})
     outputs = []
     if pulse_dir is not None:
         outputs.append({"uri": f"imas:hdf5?path={pathlib.Path(pulse_dir).resolve().as_posix()}"})
@@ -1274,7 +1408,7 @@ def run_migration(
     db: Any = None,
     per_time_slice: bool = True,
     resolve_spec: dict[str, dict] | None = None,
-    database_comment: str | None = None,
+    header: IdsHeader = IdsHeader(),
 ) -> None:
     """Build and write each pulse to disk immediately, without accumulating in memory.
 
@@ -1287,10 +1421,10 @@ def run_migration(
     (its values are exact; see `summary_metadata`). A pulse with several time-slices is also written
     to HDF5 under `output_dir` and attached as the entry's output, the files keep the per-slice values.
 
-    `database_comment` (see `format_database_comment`) is stamped onto every root's
-    `ids_properties.comment` in every pulse.
+    `header` (comment, creation date, provenance, code; see `new_ids`) is stamped onto every root
+    in every pulse; its `code` also goes into each SimDB manifest.
     """
-    # name -> "standard_name"/"db_variable", used to split SimDB manifest variables (see make_manifest).
+    # name -> "standard_name"/"unmapped", used to split SimDB manifest variables (see make_manifest).
     temp_name_kind = dict(
         temp_var_name(cw_row) for _, cw_row in crosswalk.loc[crosswalk["status"] == "manifest"].iterrows()
     )
@@ -1352,7 +1486,7 @@ def run_migration(
                     machine_col,
                     pulse_ids=pulse_ids,
                     context=context,
-                    database_comment=database_comment,
+                    header=header,
                 )
             for ids in pulse_ids.values():
                 backfill_time(ids, times)
@@ -1367,7 +1501,7 @@ def run_migration(
         for pulse_idx, data_row in data.iterrows():
             if data_row.isna().all():
                 continue
-            pulse_ids = process_pulse(data_row, crosswalk, factory, machine_col, database_comment=database_comment)
+            pulse_ids = process_pulse(data_row, crosswalk, factory, machine_col, header=header)
             for ids in pulse_ids.values():
                 backfill_time(ids)
 
@@ -1406,7 +1540,16 @@ def run_migration(
             temp_ids = pulse_ids.get("temporary")
             variables = extract_variables(temp_ids) if temp_ids is not None else {}
             summary_meta = {} if pulse_dir is not None else summary_metadata(pulse_ids)
-            manifest = make_manifest(dataset, machine, alias, variables, temp_name_kind, summary_meta, pulse_dir)
+            manifest = make_manifest(
+                dataset,
+                machine,
+                alias,
+                variables,
+                temp_name_kind,
+                summary_meta,
+                pulse_dir,
+                header.code or CodeInfo(),
+            )
             if simdb_ingest(db, config, manifest, alias):
                 ingested += 1
             else:
@@ -1435,6 +1578,7 @@ def main(argv: list[str] | None = None, db: Any = None) -> None:
     `simdb_ingest`). With --remote, an `upload_to_simdb_server.SimDBServerUploader` for that server is used this way.
     """
     global VERBOSE
+    migration_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     args = parse_args(argv)
     if args.remote:
         args.simdb = True
@@ -1485,7 +1629,12 @@ def main(argv: list[str] | None = None, db: Any = None) -> None:
         db=db,
         per_time_slice=args.per_time_slice,
         resolve_spec=sidecar["resolve"],
-        database_comment=format_database_comment(sidecar["database"]),
+        header=IdsHeader(
+            comment=format_database_comment(sidecar["database"]),
+            creation_date=migration_date,
+            references=tuple(database_references(sidecar["database"])),
+            code=code_info(),
+        ),
     )
     if uploader is not None and not upload_to_simdb_server.report(uploader):
         sys.exit(1)
