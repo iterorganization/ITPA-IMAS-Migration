@@ -5,7 +5,7 @@ A static page plus a small nginx reverse proxy that puts the whole service behin
 | Path | Served by |
 |---|---|
 | `/` | this landing page (`site/`) |
-| `/dashboard/` | SimDB dashboard (default `host.docker.internal:8080`) |
+| `/dashboard/` | SimDB dashboard (default `host.docker.internal:80`) |
 | `/scenarios/api/` (also `/api`, `/scenarios`, `/swaggerui`) | SimDB server (default `host.docker.internal:5000`), with the prefix stripped and passed as `X-Forwarded-Prefix` |
 
 The API rules copy the SimDB dashboard's own proxy
@@ -17,7 +17,7 @@ so the API behaves the same as through `/dashboard/`.
 ```
 site/                           index.html, style.css (edit these to change the page)
 nginx/templates/                nginx config, envsubst-processed at container start
-docker-compose.yml              nginx:1.27-alpine, publishes LANDING_PORT (default 80)
+docker-compose.yml              nginx:1.27-alpine, publishes LANDING_PORT (default 8081)
 itpea-landing.service           systemd unit (runs docker compose from /opt/itpea-landing)
 itpea-landing.env.example       ports/hosts, installed as /etc/itpea-landing/itpea-landing.env
 Makefile                        install / update / uninstall
@@ -26,16 +26,17 @@ Makefile                        install / update / uninstall
 ## Install on the server VM
 
 Prerequisites: the SimDB server (`simdb-server.service`, port 5000) and dashboard
-(`simdb-dashboard.service`) are running. Port 80 must be free, so move the dashboard off it
-(`DASHBOARD_PORT=8080` in `/etc/simdb-dashboard/simdb-dashboard.env`) and stop any other
-dashboard container still holding port 80.
+(`simdb-dashboard.service`, port 80) are running. The landing page listens on port 8081, so open
+it in the VM firewall and point the F5 for `itpea-db.iter.org` at `10.154.72.16:8081`.
+(If the F5 points at port 80 instead, visitors land directly on the dashboard.)
 
 ```bash
 git clone https://github.com/iterorganization/ITPA-IMAS-Migration.git
 cd ITPA-IMAS-Migration/landing
 sudo make install
 sudo systemctl start itpea-landing
-curl -s http://localhost/healthz          # ok
+curl -s http://localhost:8081/healthz     # ok
+sudo firewall-cmd --add-port=8081/tcp --permanent && sudo firewall-cmd --reload
 ```
 
 If the dashboard or SimDB use other ports, set them in `/etc/itpea-landing/itpea-landing.env`
@@ -54,6 +55,6 @@ sudo make -C landing update     # copies site/ and nginx/ to /opt/itpea-landing 
 
 ```bash
 cd landing
-LANDING_PORT=8090 make up       # http://localhost:8090/
+make up                         # http://localhost:8081/
 make down
 ```
