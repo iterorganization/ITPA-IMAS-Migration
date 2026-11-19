@@ -3,6 +3,7 @@
 #   make up / make down         run locally with docker compose (no root)
 #   sudo make install           copy to /opt/itpea-landing and install the unit
 #   sudo make update            copy changed site/nginx files and reload
+#   sudo make tls-selfsigned    create a self-signed cert in /etc/itpea-landing/tls (HTTPS listener)
 #   sudo make uninstall         stop, disable and remove the unit (keeps the env file)
 
 SHELL := /bin/sh
@@ -11,11 +12,14 @@ NAME ?= itpea-landing
 optdir ?= /opt/$(NAME)
 etcdir ?= /etc/$(NAME)
 unitdir ?= /etc/systemd/system
+tlsdir ?= $(etcdir)/tls
+TLS_CN ?= itpea-db.iter.org
+TLS_SAN ?= DNS:itpea-db.iter.org,IP:10.154.72.16
 
-.PHONY: help up down logs copy-files install update uninstall status
+.PHONY: help up down logs copy-files install update uninstall status tls-selfsigned
 
 help:
-	@sed -n '3,7p' Makefile
+	@sed -n '3,8p' Makefile
 
 up:
 	docker compose up --detach
@@ -27,12 +31,16 @@ logs:
 	docker compose logs -f landing
 
 $(optdir):
-	install -d -m 0755 $(optdir) $(optdir)/site $(optdir)/nginx/templates
+	install -d -m 0755 $(optdir) $(optdir)/site $(optdir)/nginx/templates \
+		$(optdir)/nginx/snippets $(optdir)/nginx/https
 
 copy-files: $(optdir)
-	install -m 0644 docker-compose.yml $(optdir)/
+	install -d -m 0755 $(optdir)/nginx/snippets $(optdir)/nginx/https
+	install -m 0644 docker-compose.yml docker-compose.https.yml $(optdir)/
 	install -m 0644 site/* $(optdir)/site/
 	install -m 0644 nginx/templates/*.template $(optdir)/nginx/templates/
+	install -m 0644 nginx/snippets/*.conf $(optdir)/nginx/snippets/
+	install -m 0644 nginx/https/*.conf $(optdir)/nginx/https/
 
 install: copy-files
 	install -d -m 0755 $(etcdir)
@@ -46,6 +54,19 @@ install: copy-files
 
 update: copy-files
 	systemctl reload $(NAME)
+
+# Self-signed certificate for the HTTPS listener (the F5 terminates the public
+# TLS; it normally does not verify the backend certificate). Kept if present.
+tls-selfsigned:
+	install -d -m 0755 $(tlsdir)
+	@if [ -f $(tlsdir)/server.crt ]; then \
+		echo "$(tlsdir)/server.crt exists, not overwriting"; \
+	else \
+		openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+			-subj "/CN=$(TLS_CN)" -addext "subjectAltName=$(TLS_SAN)" \
+			-keyout $(tlsdir)/server.key -out $(tlsdir)/server.crt && \
+		chmod 0600 $(tlsdir)/server.key && chmod 0644 $(tlsdir)/server.crt; \
+	fi
 
 status:
 	-systemctl status --no-pager $(NAME)

@@ -13,6 +13,7 @@ services:
     volumes:
       - ./site:/usr/share/nginx/html:ro
       - ./nginx/templates:/etc/nginx/templates:ro
+      - ./nginx/snippets:/etc/nginx/snippets:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
