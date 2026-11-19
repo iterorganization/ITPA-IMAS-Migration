@@ -1,0 +1,12 @@
+# Adds an HTTPS listener to the landing nginx (for an F5 that forwards to the
+# backend on 443/TCP). Enable it in /etc/itpea-landing/itpea-landing.env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.https.yml
+# The certificate directory must contain server.crt and server.key
+# (`sudo make tls-selfsigned` creates a self-signed pair).
+services:
+  landing:
+    ports:
+      - "${LANDING_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/https/https.conf:/etc/nginx/conf.d/https.conf:ro
+      - ${LANDING_TLS_DIR:-/etc/itpea-landing/tls}:/etc/nginx/tls:ro
