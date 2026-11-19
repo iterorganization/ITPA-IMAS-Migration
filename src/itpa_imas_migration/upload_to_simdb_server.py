@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import quote
 
 from simdb.checksum import hash_file
+from simdb.cli import remote_api as _remote_api
 from simdb.cli.remote_api import RemoteAPI, _expand_directories_http
 from simdb.cli.resumable_upload import resumable_upload
 from simdb.config.config import Config
@@ -81,7 +82,10 @@ class SimDBServerUploader:
             add_watcher=False,
             uploaded_by=self.uploaded_by,
         )
-        self.api.post("simulations", data=post_data.model_dump(mode="json"))
+        if hasattr(_remote_api, "serialise_request_data"):
+            self.api.post("simulations", data=post_data)
+        else:
+            self.api.post("simulations", data=post_data.model_dump(mode="json"))
         self.posted[simulation.alias] = simulation.uuid.hex
 
     def _upload(self, files: list, sim_uuid: Any) -> list:
