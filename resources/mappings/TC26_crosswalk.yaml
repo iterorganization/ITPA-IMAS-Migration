@@ -2,13 +2,13 @@ database:
   name: ITPA TC-26 
   version: 2026 publication dataset
   # Variable definitions are available in the article's supplementary downloads.
-  definitions: https://iopscience.iop.org/article/10.1088/1741-4326/ae39f2
+  definitions: https://iopscience.iop.org/article/10.1088/1741-4326/ae39f2/data
   paper: 'Empirical scaling of the L-H threshold power for metal wall tokamaks using a multi-device database,
     Nucl. Fusion 66 036016 (2026), DOI: 10.1088/1741-4326/ae39f2,
     https://doi.org/10.1088/1741-4326/ae39f2'
   # The CSV is available in the article's supplementary downloads.
   csv:
-  - https://iopscience.iop.org/article/10.1088/1741-4326/ae39f2
+  - https://iopscience.iop.org/article/10.1088/1741-4326/ae39f2/data
   authors:
   - E. Delabie
   - E. R. Solano
