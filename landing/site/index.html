@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ITPEA Databases in IMAS</title>
+  <meta name="description" content="ITPEA: ITPA multi-machine databases migrated to the IMAS summary IDS and served through SimDB.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <p class="eyebrow">ITER Organization &middot; IMAS</p>
+      <h1>ITPEA Databases in IMAS</h1>
+      <p class="lead">
+        Multi-machine ITPA databases, migrated from their original CSV tables into the
+        IMAS <code>summary</code> IDS, one SimDB entry per pulse.
+      </p>
+      <nav class="actions" aria-label="Main services">
+        <a class="btn primary" href="/dashboard/">Browse the data</a>
+        <a class="btn" href="/scenarios/api/">SimDB API</a>
+        <a class="btn" href="https://github.com/iterorganization/ITPA-IMAS-Migration/blob/main/docs/migration.md">Migration docs</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section aria-labelledby="pipeline">
+      <h2 id="pipeline">How the data gets here</h2>
+      <ol class="pipeline">
+        <li>
+          <h3>Source CSV</h3>
+          <p>The published database table, one row per time slice.</p>
+        </li>
+        <li>
+          <h3>Crosswalk</h3>
+          <p>A per-database workbook mapping each column to an IMAS path, with unit
+            transforms, no-data markers and duplicate resolution.</p>
+        </li>
+        <li>
+          <h3>IMAS <code>summary</code> IDS</h3>
+          <p>Each pulse is written as an IMAS <code>summary</code> IDS, following the Data Dictionary paths in the crosswalk.</p>
+        </li>
+        <li>
+          <h3>SimDB</h3>
+          <p>One entry per pulse, searchable by machine, pulse and metadata.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="datasets">
+      <h2 id="datasets">Databases</h2>
+      <div class="cards">
+        <article class="card">
+          <h3>Global H-mode Confinement Database</h3>
+          <p class="meta">DB5.2.3</p>
+          <p>The updated ITPA global H-mode confinement database.</p>
+          <p class="ref">G. Verdoolaege <i>et al.</i>, Nucl. Fusion 61 076006 (2021)</p>
+          <ul class="links">
+            <li><a href="https://doi.org/10.1088/1741-4326/abdb91">Paper</a></li>
+            <li><a href="https://osf.io/drwcq/">Variable definitions</a></li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h3>L-mode Confinement Database</h3>
+          <p class="meta">LDB3.2</p>
+          <p>The ITER L-mode confinement database.</p>
+          <p class="ref">S. M. Kaye <i>et al.</i>, Nucl. Fusion 37 (1997) 1303</p>
+          <ul class="links">
+            <li><a href="https://doi.org/10.1088/0029-5515/37/9/I10">Paper</a></li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h3>Global L-H Threshold Database</h3>
+          <p class="meta">IGDBTH v4.7 (June 2021)</p>
+          <p>The ITPA international L-H power threshold database.</p>
+          <p class="ref">Y. R. Martin <i>et al.</i>, J. Phys.: Conf. Ser. 123 012033 (2008)</p>
+          <ul class="links">
+            <li><a href="https://doi.org/10.1088/1742-6596/123/1/012033">Paper</a></li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h3>TC-26 Metal-Wall L-H Threshold</h3>
+          <p class="meta">2026 publication dataset</p>
+          <p>Multi-device database for the L-H threshold power scaling in metal-wall tokamaks.</p>
+          <p class="ref">E. Delabie <i>et al.</i>, Nucl. Fusion 66 036016 (2026)</p>
+          <ul class="links">
+            <li><a href="https://doi.org/10.1088/1741-4326/ae39f2">Paper and data</a></li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="access">
+      <h2 id="access">Access from Python or the command line</h2>
+      <p>Register this server as a SimDB remote once, then list or query entries:</p>
+      <pre><code>simdb remote config new itpa https://itpea-db.iter.org/scenarios/api \
+    --firewall F5 --username &lt;your ITER login&gt;
+simdb remote itpa list</code></pre>
+      <p>
+        The analysis notebooks in the
+        <a href="https://github.com/iterorganization/ITPA-IMAS-Migration">ITPA-IMAS-Migration repository</a>
+        read their data from this server through the same API.
+      </p>
+    </section>
+
+    <section aria-labelledby="more">
+      <h2 id="more">More</h2>
+      <ul class="plain">
+        <li><a href="https://github.com/iterorganization/ITPA-IMAS-Migration/blob/main/docs/migration.md">Crosswalk format and migration script reference</a></li>
+        <li><a href="https://github.com/iterorganization/ITPA-IMAS-Migration/blob/main/docs/migration_data_logbook.md">Data logbook: known issues in the source tables</a></li>
+        <li><a href="https://github.com/iterorganization/SimDB">SimDB</a> and the <a href="https://github.com/iterorganization/SimDB-Dashboard">SimDB dashboard</a></li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <p>ITER Organization. Data remain the property of the ITPA database contributors; cite the papers above when using them.</p>
+    </div>
+  </footer>
+</body>
+</html>

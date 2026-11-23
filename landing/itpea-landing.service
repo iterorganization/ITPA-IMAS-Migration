@@ -1,0 +1,31 @@
+# ITPEA landing page (nginx front door for itpea-db.iter.org).
+# Installed by `sudo make -C landing install`.
+
+[Unit]
+Description=ITPEA landing page and reverse proxy for SimDB
+Documentation=https://github.com/iterorganization/ITPA-IMAS-Migration
+Requires=docker.service
+After=docker.service network-online.target simdb-server.service simdb-dashboard.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/itpea-landing
+EnvironmentFile=-/etc/itpea-landing/itpea-landing.env
+
+ExecStartPre=-/usr/bin/docker compose pull --ignore-pull-failures
+ExecStart=/usr/bin/docker compose up --detach --remove-orphans
+ExecReload=/usr/bin/docker compose up --detach --remove-orphans --force-recreate
+ExecStop=/usr/bin/docker compose down
+
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

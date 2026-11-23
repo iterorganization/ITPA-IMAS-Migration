@@ -1,0 +1,29 @@
+# Front door for itpea-db.iter.org: upstreams and the plain-HTTP server.
+# Routes are in nginx/snippets/locations.conf, shared with the optional HTTPS
+# server (nginx/https/https.conf, enabled by docker-compose.https.yml).
+#
+# The official nginx image runs envsubst on /etc/nginx/templates/*.template at
+# startup, substituting only variables that are set in the container
+# environment (DASHBOARD_HOST/PORT, SIMDB_HOST/PORT), so nginx's own $variables
+# are left alone.
+
+upstream dashboard_backend {
+    server ${DASHBOARD_HOST}:${DASHBOARD_PORT};
+}
+
+upstream simdb_backend {
+    server ${SIMDB_HOST}:${SIMDB_PORT};
+}
+
+# Keep the F5's X-Forwarded-Proto if it sends one, so the backends build
+# https:// URLs; otherwise use the scheme of this connection.
+map $http_x_forwarded_proto $forwarded_proto {
+    default $http_x_forwarded_proto;
+    ""      $scheme;
+}
+
+server {
+    listen 80;
+    server_name _;
+    include /etc/nginx/snippets/locations.conf;
+}
